@@ -27,8 +27,22 @@ install_rke2() {
   if limactl list --quiet 2>/dev/null | grep -qx "${VM_NAME}"; then
     echo "Lima VM '${VM_NAME}' already exists. Nothing to do (uninstall first to reinstall)."
   else
-    echo "Creating Lima Ubuntu VM '${VM_NAME}'..."
-    limactl start --name="${VM_NAME}" --tty=false --cpus=4 --memory=8 --disk=40 template://ubuntu-lts
+    echo "Creating Lima Ubuntu 24.04 VM '${VM_NAME}'..."
+    # Pin Ubuntu 24.04 LTS (noble). Lima's `ubuntu-lts` now resolves to 26.04 / kernel 7.x,
+    # which is ahead of RKE2's validated platform matrix and crash-loops the kubelet.
+    local cfg="${TMPDIR:-/tmp}/rke2-lima.yaml"
+    cat > "${cfg}" <<'EOF'
+images:
+  - location: "https://cloud-images.ubuntu.com/releases/noble/release/ubuntu-24.04-server-cloudimg-amd64.img"
+    arch: "x86_64"
+  - location: "https://cloud-images.ubuntu.com/releases/noble/release/ubuntu-24.04-server-cloudimg-arm64.img"
+    arch: "aarch64"
+cpus: 4
+memory: "8GiB"
+disk: "40GiB"
+EOF
+    limactl start --name="${VM_NAME}" --tty=false "${cfg}"
+    rm -f "${cfg}"
   fi
 
   echo 'Writing RKE2 config inside the VM (bundled ingress-nginx disabled)...'
