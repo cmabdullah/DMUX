@@ -1,16 +1,36 @@
-# k3s Install / Uninstall Scripts — User Guide
+# k3s & RKE2 Install / Uninstall Scripts — User Guide
 
-Two self-contained scripts that stand up and tear down a local **k3s** Kubernetes cluster,
-one per operating system. Each handles **install**, **uninstall**, and **status** through a
-single subcommand.
+Self-contained scripts that stand up and tear down a local Kubernetes cluster — **k3s** or
+**RKE2** (both Rancher/SUSE distributions) — one script per OS. Each handles **install**,
+**uninstall**, and **status** through a single subcommand.
 
-| Script          | Runs on        | How k3s runs                                                |
-|-----------------|----------------|-------------------------------------------------------------|
-| `k3s-ubuntu.sh` | Linux / Ubuntu | **Native** k3s (systemd service) via the official installer |
-| `k3s-mac.sh`    | macOS          | k3s **inside Docker** via k3d (k3s is Linux-only)           |
+| Script           | Distro | Runs on        | How it runs                                                 |
+|------------------|--------|----------------|-------------------------------------------------------------|
+| `k3s-ubuntu.sh`  | k3s    | Linux / Ubuntu | **Native** k3s (systemd service) via the official installer |
+| `k3s-mac.sh`     | k3s    | macOS          | k3s **inside Docker** via k3d                               |
+| `rke2-ubuntu.sh` | RKE2   | Linux / Ubuntu | **Native** RKE2 (`rke2-server` systemd service)             |
+| `rke2-mac.sh`    | RKE2   | macOS          | RKE2 **inside a Lima Linux VM**                             |
 
-Both pin the same version (`v1.36.2+k3s1`), disable the bundled Traefik, and use k3s's
-built-in containerd runtime.
+All four share the same subcommand UX, the same safety header, and the same idempotency
+guards. They disable the distro's bundled ingress controller (so you bring your own) and use
+the **containerd** runtime.
+
+### k3s vs RKE2 — which do I want?
+
+|                 | **k3s**                     | **RKE2**                                    |
+|-----------------|-----------------------------|---------------------------------------------|
+| Focus           | Lightweight, edge/dev, fast | Security/compliance, production, government |
+| Datastore       | SQLite (single binary)      | **etcd**                                    |
+| Bundled ingress | Traefik                     | **ingress-nginx**                           |
+| CNI             | Flannel                     | **Canal** (Calico + Flannel)                |
+| Hardening       | minimal                     | **CIS / FIPS 140-2** focus                  |
+| Footprint       | smaller                     | larger                                      |
+| macOS story     | k3d (k3s-in-Docker)         | Lima VM (no RKE2-in-Docker exists)          |
+
+> Rule of thumb: **k3s** for the lightest local dev loop; **RKE2** when you want to mirror a
+> hardened, etcd-backed production cluster.
+
+The sections below document **k3s** in depth (§1–§10), then **RKE2** (§11).
 
 ---
 
@@ -326,3 +346,131 @@ Edit the constants at the top of each script:
 - The kubeconfig holds **cluster-admin credentials**. The Ubuntu script `chmod 600`s it;
   don't commit it or share it.
 - These scripts are standalone and do not integrate with any build system.
+
+---
+
+## 11. RKE2 (`rke2-ubuntu.sh`, `rke2-mac.sh`)
+
+RKE2 is Rancher's **security-hardened, etcd-backed** Kubernetes distribution. These two scripts
+mirror the k3s scripts' UX (`install | uninstall | status`, same safety header, same
+idempotency) but target RKE2.
+
+### 11.1 Quick start
+
+```bash
+# Linux / Ubuntu
+./rke2-ubuntu.sh install
+./rke2-ubuntu.sh status
+./rke2-ubuntu.sh uninstall
+
+# macOS (runs RKE2 in a Lima VM)
+./rke2-mac.sh install
+./rke2-mac.sh status
+./rke2-mac.sh uninstall
+```
+
+> **Version pin:** both scripts default to `RKE2_VERSION='v1.36.2+rke2r1'`. RKE2 release tags
+> do **not** always match k3s's — before a real install, confirm a published tag at
+> <https://github.com/rancher/rke2/releases> and edit the constant (or switch to
+> `INSTALL_RKE2_CHANNEL=stable`).
+
+### 11.2 Prerequisites
+
+- **Ubuntu:** systemd host, `sudo`, `curl`, outbound access to `get.rke2.io`.
+- **macOS:** **Homebrew** (auto-installs `lima` + `kubectl`) and enough free RAM/disk for a VM
+  (defaults: 4 CPU / 8 GB / 40 GB). No Docker needed — RKE2 runs inside the Lima VM.
+
+### 11.3 How the Ubuntu RKE2 script works
+
+```bash
+# config written before install — bring-your-own-ingress
+/etc/rancher/rke2/config.yaml:
+  write-kubeconfig-mode: "0644"
+  disable:
+    - rke2-ingress-nginx
+
+curl -sfL https://get.rke2.io | INSTALL_RKE2_VERSION="v1.36.2+rke2r1" sh -
+sudo systemctl enable --now rke2-server.service
+```
+
+Mechanism:
+
+1. **Config first:** `config.yaml` is RKE2's control surface (the equivalent of k3s's
+   `INSTALL_K3S_EXEC` flags). It sets a readable kubeconfig mode and disables the bundled
+   **ingress-nginx** (parity with the k3s `--disable=traefik` intent).
+2. **Installer:** `get.rke2.io` lays down the RKE2 binaries under `/var/lib/rancher/rke2/bin`
+   and the `rke2-server.service` systemd unit. `INSTALL_RKE2_VERSION` pins the release.
+3. **Start:** enabling `rke2-server` boots the control plane. **First boot pulls several images
+   and can take minutes** (RKE2 runs its control-plane components as static pods, unlike k3s's
+   single process) — so the readiness wait uses a **300s** timeout.
+4. **Datastore:** **etcd** (not SQLite), managed by RKE2.
+5. **Kubeconfig:** written to `/etc/rancher/rke2/rke2.yaml`; the script copies it to
+   `~/.kube/config`, `chown`s it to you, and `chmod 600`s it. RKE2's own `kubectl` lives at
+   `/var/lib/rancher/rke2/bin/kubectl` — add that dir to `PATH`, or use your own `kubectl`.
+6. **Uninstall:** `sudo /usr/local/bin/rke2-uninstall.sh` (installer-generated) stops the
+   service and removes binaries, `/etc/rancher/rke2`, and `/var/lib/rancher/rke2` — total and
+   destructive. The script then drops `~/.kube/config` only if it pointed at this cluster.
+
+### 11.4 How the macOS RKE2 script works (Lima)
+
+RKE2 has **no k3d-equivalent** (no "RKE2-in-Docker"), so the Mac script runs it inside a
+**Lima** Linux VM:
+
+1. `ensure_tools` installs `lima` + `kubectl` via Homebrew if missing.
+2. `limactl start --name=rke2 template://ubuntu-lts` boots an Ubuntu VM (4 CPU / 8 GB / 40 GB).
+3. Inside the VM (`limactl shell rke2 ...`) it writes the same `config.yaml` and runs the same
+   `get.rke2.io` installer + `systemctl enable --now rke2-server`.
+4. It waits for the node to be `Ready`, then copies `/etc/rancher/rke2/rke2.yaml` out to
+   `~/.kube/rke2-lima.yaml`. The kubeconfig server is `https://127.0.0.1:6443`, reachable from
+   the host because **Lima auto-forwards** the VM's `6443` to host `127.0.0.1:6443`.
+5. Use it with `export KUBECONFIG=~/.kube/rke2-lima.yaml`.
+6. **Uninstall:** `limactl stop -f rke2 && limactl delete -f rke2` removes the whole VM (so no
+   in-guest `rke2-uninstall.sh` needed), then deletes the exported kubeconfig.
+
+> Unlike the k3s-mac script, this one does **not** map host ports 80/443 — it exposes only the
+> API server via Lima's default forward. Add `portForwards` to the Lima config if you need
+> ingress ports on the host.
+
+### 11.5 k3s vs RKE2 script differences (at a glance)
+
+|                          | k3s scripts                       | RKE2 scripts                           |
+|--------------------------|-----------------------------------|----------------------------------------|
+| Config surface           | CLI flags (`INSTALL_K3S_EXEC`)    | `/etc/rancher/rke2/config.yaml`        |
+| Datastore                | SQLite                            | **etcd**                               |
+| Bundled ingress disabled | Traefik                           | **ingress-nginx**                      |
+| Service unit             | `k3s.service`                     | `rke2-server.service`                  |
+| kubectl path             | symlinked from the k3s binary     | `/var/lib/rancher/rke2/bin/kubectl`    |
+| Kubeconfig               | `/etc/rancher/k3s/k3s.yaml`       | `/etc/rancher/rke2/rke2.yaml`          |
+| macOS mechanism          | k3d (Docker)                      | **Lima VM**                            |
+| First-boot time          | seconds                           | **minutes** (static-pod control plane) |
+| Uninstall                | `k3s-uninstall.sh` / `k3d delete` | `rke2-uninstall.sh` / `limactl delete` |
+
+### 11.6 RKE2 troubleshooting
+
+| Symptom                                      | Likely cause / fix                                                                                                          |
+|----------------------------------------------|-----------------------------------------------------------------------------------------------------------------------------|
+| Install fails pulling the version            | The pinned `RKE2_VERSION` tag doesn't exist — pick a real one from the releases page, or use `INSTALL_RKE2_CHANNEL=stable`. |
+| Ubuntu: stuck "Waiting for node to be Ready" | Normal on first boot (image pulls); check `sudo journalctl -u rke2-server -f`.                                              |
+| `kubectl: command not found` (Ubuntu)        | `export PATH=$PATH:/var/lib/rancher/rke2/bin`.                                                                              |
+| macOS: `cluster not reachable`               | `limactl list` (is `rke2` Running?); `limactl shell rke2 sudo systemctl status rke2-server`.                                |
+| macOS: port 6443 already in use              | Another cluster/kubeconfig owns it; stop it, or edit Lima's port forwards.                                                  |
+
+Useful inspection:
+
+```bash
+# Ubuntu
+sudo systemctl status rke2-server
+sudo journalctl -u rke2-server -f
+sudo /var/lib/rancher/rke2/bin/crictl ps     # containers via RKE2's containerd
+
+# macOS
+limactl list
+limactl shell rke2 sudo systemctl status rke2-server
+```
+
+### 11.7 Customizing RKE2
+
+- `RKE2_VERSION` — the release pin (both scripts).
+- `config.yaml` (in the scripts) — add `cni:`, `tls-san:`, more `disable:` entries, CIS profile
+  (`profile: cis`), etc. See <https://docs.rke2.io/install/configuration>.
+- macOS `VM_NAME` and the `limactl start` resource flags (`--cpus/--memory/--disk`).
