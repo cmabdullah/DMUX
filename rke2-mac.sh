@@ -45,11 +45,14 @@ EOF
     rm -f "${cfg}"
   fi
 
-  echo 'Writing RKE2 config inside the VM (bundled ingress-nginx disabled)...'
+  echo 'Writing RKE2 config inside the VM (bundled ingress disabled)...'
   limactl shell "${VM_NAME}" sudo mkdir -p /etc/rancher/rke2
+  # Disable the bundled ingress controller (bring-your-own). RKE2 ships Traefik in current
+  # releases and ingress-nginx in older ones; list both — unknown entries are ignored.
   limactl shell "${VM_NAME}" sudo tee /etc/rancher/rke2/config.yaml >/dev/null <<'EOF'
 write-kubeconfig-mode: "0644"
 disable:
+  - rke2-traefik
   - rke2-ingress-nginx
 EOF
 
@@ -58,17 +61,19 @@ EOF
     "curl -sfL https://get.rke2.io | INSTALL_RKE2_VERSION='${RKE2_VERSION}' sh -"
   limactl shell "${VM_NAME}" sudo systemctl enable --now rke2-server.service
 
-  echo 'Waiting for kubeconfig...'
+  echo 'Waiting for kubeconfig to be generated...'
   limactl shell "${VM_NAME}" sudo bash -c 'until [ -f /etc/rancher/rke2/rke2.yaml ]; do sleep 3; done'
 
-  echo 'Waiting for node to be Ready...'
-  limactl shell "${VM_NAME}" sudo /var/lib/rancher/rke2/bin/kubectl \
-    --kubeconfig /etc/rancher/rke2/rke2.yaml wait --for=condition=Ready nodes --all --timeout=300s
-
-  echo "Exporting kubeconfig to ${KUBECONFIG_DST} (apiserver reached via Lima's 127.0.0.1:6443 port-forward)..."
+  # Export the kubeconfig to the host FIRST, then wait from the host via Lima's 127.0.0.1:6443
+  # forward. This avoids holding a long-lived `limactl shell` session open during the slow cold
+  # boot — heavy image pulls can saturate the guest and wedge the SSH ControlMaster.
+  echo "Exporting kubeconfig to ${KUBECONFIG_DST}..."
   mkdir -p "$(dirname "${KUBECONFIG_DST}")"
   limactl shell "${VM_NAME}" sudo cat /etc/rancher/rke2/rke2.yaml > "${KUBECONFIG_DST}"
   chmod 600 "${KUBECONFIG_DST}"
+
+  echo 'Waiting for node to be Ready (cold first boot pulls all control-plane images)...'
+  KUBECONFIG="${KUBECONFIG_DST}" kubectl wait --for=condition=Ready nodes --all --timeout=600s
 
   echo 'RKE2 (via Lima) install complete.'
   echo "Use it with:  export KUBECONFIG=${KUBECONFIG_DST}"

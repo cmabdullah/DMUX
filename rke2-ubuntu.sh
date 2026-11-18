@@ -13,11 +13,13 @@ require_linux() {
 }
 
 write_config() {
-  # Bring-your-own-ingress: disable RKE2's bundled ingress-nginx (parity with the k3s --disable=traefik intent).
+  # Bring-your-own-ingress (parity with the k3s --disable=traefik intent). RKE2 ships Traefik in
+  # current releases and ingress-nginx in older ones; list both — unknown entries are ignored.
   sudo mkdir -p /etc/rancher/rke2
   sudo tee /etc/rancher/rke2/config.yaml >/dev/null <<'EOF'
 write-kubeconfig-mode: "0644"
 disable:
+  - rke2-traefik
   - rke2-ingress-nginx
 EOF
 }
