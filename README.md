@@ -474,3 +474,92 @@ limactl shell rke2 sudo systemctl status rke2-server
 - `config.yaml` (in the scripts) — add `cni:`, `tls-san:`, more `disable:` entries, CIS profile
   (`profile: cis`), etc. See <https://docs.rke2.io/install/configuration>.
 - macOS `VM_NAME` and the `limactl start` resource flags (`--cpus/--memory/--disk`).
+
+---
+
+## 12. Verifying the cluster is running
+
+### 12.1 Point `kubectl` at the right kubeconfig
+
+Each script writes its kubeconfig to a different place:
+
+| Script | Kubeconfig to use |
+|---|---|
+| `k3s-ubuntu.sh` | `~/.kube/config` (default — nothing to set) |
+| `k3s-mac.sh` | `~/.kube/config`, context `k3d-localdev` (`kubectl config use-context k3d-localdev`) |
+| `rke2-ubuntu.sh` | `~/.kube/config` (default) |
+| `rke2-mac.sh` | `~/.kube/rke2-lima.yaml` → `export KUBECONFIG=~/.kube/rke2-lima.yaml` |
+
+```bash
+# RKE2 on macOS:
+export KUBECONFIG=~/.kube/rke2-lima.yaml
+```
+
+### 12.2 The one-line health check
+
+```bash
+kubectl get nodes
+```
+
+Healthy — **`STATUS` must say `Ready`**:
+
+```
+NAME        STATUS   ROLES                AGE   VERSION
+lima-rke2   Ready    control-plane,etcd   20m   v1.36.2+rke2r1
+```
+
+### 12.3 The script's built-in check
+
+```bash
+./rke2-mac.sh status      # or k3s-mac.sh / *-ubuntu.sh — runs limactl/systemctl + kubectl get nodes
+```
+
+### 12.4 Deeper checks
+
+```bash
+# All system pods up? (want Running / Completed — not CrashLoopBackOff or Pending)
+kubectl get pods -A
+
+# API server healthy? (prints "readyz check passed" at the end)
+kubectl get --raw='/readyz?verbose'
+
+# Control-plane endpoints + CoreDNS
+kubectl cluster-info
+
+# Is the backing VM/engine up?
+limactl list          # RKE2-mac / (k3s-mac: `k3d cluster list` + `docker ps | grep k3d`)
+```
+
+### 12.5 Confirm RKE2 is configured as intended
+
+```bash
+# The applied config (disable list, kubeconfig mode, etc.)
+limactl shell rke2 sudo cat /etc/rancher/rke2/config.yaml        # macOS
+sudo cat /etc/rancher/rke2/config.yaml                            # Ubuntu
+
+# Datastore is etcd (RKE2 default) and service is enabled + active
+kubectl get pods -n kube-system -l component=etcd
+limactl shell rke2 systemctl is-enabled rke2-server              # -> enabled
+limactl shell rke2 systemctl is-active  rke2-server              # -> active
+```
+
+A properly-configured single node shows: **etcd** datastore, **Canal** CNI (`rke2-canal` 2/2),
+**containerd** runtime, `rke2-server` enabled+active, and `/readyz` passing.
+
+### 12.6 Prove it schedules workloads (the real test)
+
+```bash
+kubectl run test --image=nginx --restart=Never
+kubectl get pod test -w        # wait for STATUS = Running (Ctrl-C to stop)
+kubectl delete pod test        # clean up
+```
+
+### 12.7 Interpreting the result
+
+| You see | Meaning |
+|---|---|
+| Node `Ready` + `get pods -A` all Running/Completed | ✅ cluster is healthy |
+| Node `NotReady` | control-plane / CNI problem — check `kubectl get pods -A` |
+| `kubectl` hangs or `connection refused` | VM/engine down or forward broken — `limactl list`, then `limactl start rke2` |
+| `The connection to the server ... was refused` | wrong/empty `KUBECONFIG` — re-export it (§12.1) |
+| `config.yaml` disables an add-on but it's still Running | disabling after first boot doesn't remove it — rebuild, or `kubectl delete` it |
