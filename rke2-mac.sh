@@ -51,7 +51,7 @@ EOF
   limactl shell "${VM_NAME}" sudo bash -c 'if [[ ! -e /etc/rancher/rke2/config.yaml ]]; then cat > /etc/rancher/rke2/config.yaml; fi' <<'EOF'
 write-kubeconfig-mode: "0644"
 ingress-controller: traefik
-node-ip: 192.168.5.15
+node-ip: 192.168.64.2
 EOF
 
   echo "Installing RKE2 ${RKE2_VERSION} inside the VM (first boot can take several minutes)..."
@@ -90,7 +90,7 @@ disable:
 updated='write-kubeconfig-mode: "0644"
 ingress-controller: traefik'
 
-if [[ "$current" == "$updated" || "$current" == "$updated"$'\nnode-ip: 192.168.5.15' ]]; then
+if [[ "$current" == "$updated" || "$current" == "$updated"$'\nnode-ip: 192.168.64.2' ]]; then
   echo 'Traefik is already configured.'
 elif [[ "$current" == "$legacy" ]]; then
   backup="$config.before-traefik"
