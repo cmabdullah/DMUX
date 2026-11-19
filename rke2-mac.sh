@@ -97,12 +97,21 @@ EOF
   chmod 600 "${KUBECONFIG_DST}"
 
   echo 'Waiting for node to be Ready (cold first boot pulls all control-plane images)...'
-  KUBECONFIG="${KUBECONFIG_DST}" kubectl wait --for=condition=Ready nodes --all --timeout=600s
+  # Poll instead of `kubectl wait`: during startup the apiserver briefly serves a cert that
+  # doesn't yet chain to the cluster CA (it regenerates serving certs to add the node-ip SAN),
+  # and `kubectl wait` bails on that transient x509 error. A retrying `get` rides through it.
+  local ready="" i
+  for i in $(seq 1 120); do
+    if KUBECONFIG="${KUBECONFIG_DST}" kubectl get nodes --no-headers 2>/dev/null | grep -qw Ready; then
+      ready=1; break
+    fi
+    sleep 5
+  done
+  [[ -n "${ready}" ]] || { echo 'Node did not become Ready within ~10 min.' >&2; exit 1; }
 
   echo 'Waiting for the Traefik ingress to come up...'
   # Poll for the DaemonSet to exist (RKE2 deploys it via a Helm job shortly after node Ready),
   # then wait for it to roll out. Avoids `kubectl wait --for=create` which needs kubectl >= 1.31.
-  local i
   for i in $(seq 1 60); do
     KUBECONFIG="${KUBECONFIG_DST}" kubectl -n kube-system get daemonset/rke2-traefik >/dev/null 2>&1 && break
     sleep 5
