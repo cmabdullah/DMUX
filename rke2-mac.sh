@@ -68,6 +68,21 @@ EOF
   echo "Installing RKE2 ${RKE2_VERSION} inside the VM (first boot can take several minutes)..."
   limactl shell "${VM_NAME}" sudo bash -c \
     "curl -sfL https://get.rke2.io | INSTALL_RKE2_VERSION='${RKE2_VERSION}' sh -"
+
+  # Reboot-safety: the pinned node-ip must already exist on an interface before rke2-server
+  # starts. On a reboot, lima0's DHCP lease can land AFTER the service — etcd then can't bind
+  # node-ip and crash-loops. This drop-in makes the service wait for the configured node-ip.
+  limactl shell "${VM_NAME}" sudo mkdir -p /etc/systemd/system/rke2-server.service.d
+  limactl shell "${VM_NAME}" sudo tee /etc/systemd/system/rke2-server.service.d/10-wait-node-ip.conf >/dev/null <<'EOF'
+[Unit]
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+ExecStartPre=/bin/sh -c 'ip=$(sed -n "s/^node-ip:[[:space:]]*//p" /etc/rancher/rke2/config.yaml); [ -n "$ip" ] || exit 0; until ip -4 -o addr show | grep -qw "$ip"; do echo "waiting for node-ip $ip..."; sleep 2; done'
+EOF
+  limactl shell "${VM_NAME}" sudo systemctl daemon-reload
+
   limactl shell "${VM_NAME}" sudo systemctl enable --now rke2-server.service
 
   echo 'Waiting for kubeconfig to be generated...'
@@ -85,7 +100,13 @@ EOF
   KUBECONFIG="${KUBECONFIG_DST}" kubectl wait --for=condition=Ready nodes --all --timeout=600s
 
   echo 'Waiting for the Traefik ingress to come up...'
-  KUBECONFIG="${KUBECONFIG_DST}" kubectl -n kube-system wait --for=create daemonset/rke2-traefik --timeout=300s
+  # Poll for the DaemonSet to exist (RKE2 deploys it via a Helm job shortly after node Ready),
+  # then wait for it to roll out. Avoids `kubectl wait --for=create` which needs kubectl >= 1.31.
+  local i
+  for i in $(seq 1 60); do
+    KUBECONFIG="${KUBECONFIG_DST}" kubectl -n kube-system get daemonset/rke2-traefik >/dev/null 2>&1 && break
+    sleep 5
+  done
   KUBECONFIG="${KUBECONFIG_DST}" kubectl -n kube-system rollout status daemonset/rke2-traefik --timeout=300s
 
   echo 'RKE2 (via Lima) install complete.'
@@ -129,10 +150,10 @@ else
 fi
 EOF
   local -a kube=(kubectl --kubeconfig "${KUBECONFIG_DST}")
+  local i
   "${kube[@]}" wait --for=condition=Ready nodes --all --timeout=300s
-  "${kube[@]}" wait --for=create ingressclass/traefik --timeout=300s
-  "${kube[@]}" -n kube-system wait --for=create service/rke2-traefik --timeout=300s
-  "${kube[@]}" -n kube-system wait --for=create daemonset/rke2-traefik --timeout=300s
+  # Poll for existence (kubectl < 1.31 has no `wait --for=create`), then wait for the rollout.
+  for i in $(seq 1 60); do "${kube[@]}" -n kube-system get daemonset/rke2-traefik >/dev/null 2>&1 && break; sleep 5; done
   "${kube[@]}" -n kube-system rollout status daemonset/rke2-traefik --timeout=300s
   echo 'Traefik is ready.'
 }
