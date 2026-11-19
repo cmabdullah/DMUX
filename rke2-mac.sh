@@ -25,7 +25,7 @@ install_rke2() {
   ensure_tools
 
   if limactl list --quiet 2>/dev/null | grep -qx "${VM_NAME}"; then
-    echo "Lima VM '${VM_NAME}' already exists. Nothing to do (uninstall first to reinstall)."
+    echo "Using existing Lima VM '${VM_NAME}'..."
   else
     echo "Creating Lima Ubuntu 24.04 VM '${VM_NAME}'..."
     # Pin Ubuntu 24.04 LTS (noble). Lima's `ubuntu-lts` now resolves to 26.04 / kernel 7.x,
@@ -41,19 +41,17 @@ cpus: 4
 memory: "8GiB"
 disk: "40GiB"
 EOF
-    limactl start --name="${VM_NAME}" --tty=false "${cfg}"
+    # RKE2 manages its own containerd. Skip Lima's separate runtime setup.
+    limactl start --name="${VM_NAME}" --tty=false --vm-type=vz --network=vzNAT --containerd=none "${cfg}"
     rm -f "${cfg}"
   fi
 
-  echo 'Writing RKE2 config inside the VM (bundled ingress disabled)...'
+  echo 'Preparing RKE2 config inside the VM...'
   limactl shell "${VM_NAME}" sudo mkdir -p /etc/rancher/rke2
-  # Disable the bundled ingress controller (bring-your-own). RKE2 ships Traefik in current
-  # releases and ingress-nginx in older ones; list both — unknown entries are ignored.
-  limactl shell "${VM_NAME}" sudo tee /etc/rancher/rke2/config.yaml >/dev/null <<'EOF'
+  limactl shell "${VM_NAME}" sudo bash -c 'if [[ ! -e /etc/rancher/rke2/config.yaml ]]; then cat > /etc/rancher/rke2/config.yaml; fi' <<'EOF'
 write-kubeconfig-mode: "0644"
-disable:
-  - rke2-traefik
-  - rke2-ingress-nginx
+ingress-controller: traefik
+node-ip: 192.168.5.15
 EOF
 
   echo "Installing RKE2 ${RKE2_VERSION} inside the VM (first boot can take several minutes)..."
@@ -76,8 +74,51 @@ EOF
   KUBECONFIG="${KUBECONFIG_DST}" kubectl wait --for=condition=Ready nodes --all --timeout=600s
 
   echo 'RKE2 (via Lima) install complete.'
-  echo "Use it with:  export KUBECONFIG=${KUBECONFIG_DST}"
-  echo 'Then: kubectl get nodes'
+  echo "Use it with: $0 kubectl get nodes"
+}
+
+enable_ingress() {
+  require_mac
+  limactl shell "${VM_NAME}" sudo bash -s <<'EOF'
+set -euo pipefail
+config=/etc/rancher/rke2/config.yaml
+current=$(cat "$config")
+legacy='write-kubeconfig-mode: "0644"
+disable:
+  - rke2-traefik
+  - rke2-ingress-nginx'
+updated='write-kubeconfig-mode: "0644"
+ingress-controller: traefik'
+
+if [[ "$current" == "$updated" || "$current" == "$updated"$'\nnode-ip: 192.168.5.15' ]]; then
+  echo 'Traefik is already configured.'
+elif [[ "$current" == "$legacy" ]]; then
+  backup="$config.before-traefik"
+  cp -p --update=none "$config" "$backup"
+  tmp=$(mktemp "$config.XXXXXX")
+  trap 'rm -f "$tmp"' EXIT
+  chmod --reference="$config" "$tmp"
+  chown --reference="$config" "$tmp"
+  printf '%s\n' "$updated" > "$tmp"
+  mv "$tmp" "$config"
+  echo "Restarting RKE2. Previous config saved to $backup"
+  if ! systemctl restart rke2-server; then
+    cp -p "$backup" "$config"
+    systemctl restart rke2-server
+    exit 1
+  fi
+else
+  echo "Custom RKE2 config detected at $config. Set ingress-controller: traefik and remove rke2-traefik from disable, then restart rke2-server." >&2
+  exit 1
+fi
+EOF
+  local -a kube=(kubectl --kubeconfig "${KUBECONFIG_DST}")
+  "${kube[@]}" wait --for=condition=Ready nodes --all --timeout=300s
+  "${kube[@]}" wait --for=create ingressclass/traefik --timeout=300s
+  "${kube[@]}" -n kube-system wait --for=create service/rke2-traefik --timeout=300s
+  "${kube[@]}" -n kube-system wait --for=create daemonset/rke2-traefik --timeout=300s
+  "${kube[@]}" -n kube-system rollout status daemonset/rke2-traefik --timeout=300s
+  echo 'Traefik is ready.'
 }
 
 uninstall_rke2() {
@@ -102,7 +143,12 @@ status_rke2() {
 
 case "${1:-}" in
   install)   install_rke2 ;;
+  enable-ingress) enable_ingress ;;
   uninstall) uninstall_rke2 ;;
   status)    status_rke2 ;;
-  *) echo "usage: $0 {install|uninstall|status}" >&2; exit 1 ;;
+  kubectl)
+    shift
+    exec kubectl --kubeconfig "${KUBECONFIG_DST}" "$@"
+    ;;
+  *) echo "usage: $0 {install|enable-ingress|uninstall|status|kubectl [args...]}" >&2; exit 1 ;;
 esac
