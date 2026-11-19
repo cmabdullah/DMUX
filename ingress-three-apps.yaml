@@ -1,0 +1,156 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ingress-demo-1
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: ingress-demo-1
+  template:
+    metadata:
+      labels:
+        app: ingress-demo-1
+    spec:
+      containers:
+        - name: http
+          image: busybox:1.37
+          command: [sh, -ec]
+          args:
+            - |
+              mkdir -p /www/
+              printf 'app 1 on port 8081\n' > /www/index.html
+              exec httpd -f -p 8081 -h /www
+          ports:
+            - name: http
+              containerPort: 8081
+          readinessProbe:
+            httpGet:
+              path: /
+              port: http
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ingress-demo-1
+spec:
+  selector:
+    app: ingress-demo-1
+  ports:
+    - port: 80
+      targetPort: http
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ingress-demo-2
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: ingress-demo-2
+  template:
+    metadata:
+      labels:
+        app: ingress-demo-2
+    spec:
+      containers:
+        - name: http
+          image: busybox:1.37
+          command: [sh, -ec]
+          args:
+            - |
+              mkdir -p /www/app2
+              printf 'app 2 on port 8082\n' > /www/app2/index.html
+              exec httpd -f -p 8082 -h /www
+          ports:
+            - name: http
+              containerPort: 8082
+          readinessProbe:
+            httpGet:
+              path: /app2/
+              port: http
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ingress-demo-2
+spec:
+  selector:
+    app: ingress-demo-2
+  ports:
+    - port: 80
+      targetPort: http
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ingress-demo-3
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: ingress-demo-3
+  template:
+    metadata:
+      labels:
+        app: ingress-demo-3
+    spec:
+      containers:
+        - name: http
+          image: busybox:1.37
+          command: [sh, -ec]
+          args:
+            - |
+              mkdir -p /www/app3
+              printf 'app 3 on port 8083\n' > /www/app3/index.html
+              exec httpd -f -p 8083 -h /www
+          ports:
+            - name: http
+              containerPort: 8083
+          readinessProbe:
+            httpGet:
+              path: /app3/
+              port: http
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ingress-demo-3
+spec:
+  selector:
+    app: ingress-demo-3
+  ports:
+    - port: 80
+      targetPort: http
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: ingress-demo
+spec:
+  ingressClassName: traefik
+  rules:
+    - http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: ingress-demo-1
+                port:
+                  number: 80
+          - path: /app2
+            pathType: Prefix
+            backend:
+              service:
+                name: ingress-demo-2
+                port:
+                  number: 80
+          - path: /app3
+            pathType: Prefix
+            backend:
+              service:
+                name: ingress-demo-3
+                port:
+                  number: 80
