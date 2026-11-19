@@ -48,10 +48,21 @@ EOF
 
   echo 'Preparing RKE2 config inside the VM...'
   limactl shell "${VM_NAME}" sudo mkdir -p /etc/rancher/rke2
-  limactl shell "${VM_NAME}" sudo bash -c 'if [[ ! -e /etc/rancher/rke2/config.yaml ]]; then cat > /etc/rancher/rke2/config.yaml; fi' <<'EOF'
+
+  # Read the lima0 (vzNAT) IP at runtime. The Mac host shares that bridge, so the node — and
+  # Traefik's host ports 80/443 — is reachable directly, no port-forward. It's DHCP-assigned,
+  # so detect it instead of hardcoding. (lima0 is the interface for the single --network=vzNAT.)
+  local node_ip
+  node_ip="$(limactl shell "${VM_NAME}" ip -4 -o addr show lima0 2>/dev/null | awk '{print $4}' | cut -d/ -f1)"
+  if [[ -z "${node_ip}" ]]; then
+    echo 'Could not read the lima0 IP in the VM — was it started with --network=vzNAT?' >&2
+    exit 1
+  fi
+  echo "Using node-ip ${node_ip} (lima0 / vzNAT interface, host-reachable)..."
+  limactl shell "${VM_NAME}" sudo bash -c 'if [[ ! -e /etc/rancher/rke2/config.yaml ]]; then cat > /etc/rancher/rke2/config.yaml; fi' <<EOF
 write-kubeconfig-mode: "0644"
 ingress-controller: traefik
-node-ip: 192.168.64.2
+node-ip: ${node_ip}
 EOF
 
   echo "Installing RKE2 ${RKE2_VERSION} inside the VM (first boot can take several minutes)..."
@@ -73,7 +84,12 @@ EOF
   echo 'Waiting for node to be Ready (cold first boot pulls all control-plane images)...'
   KUBECONFIG="${KUBECONFIG_DST}" kubectl wait --for=condition=Ready nodes --all --timeout=600s
 
+  echo 'Waiting for the Traefik ingress to come up...'
+  KUBECONFIG="${KUBECONFIG_DST}" kubectl -n kube-system wait --for=create daemonset/rke2-traefik --timeout=300s
+  KUBECONFIG="${KUBECONFIG_DST}" kubectl -n kube-system rollout status daemonset/rke2-traefik --timeout=300s
+
   echo 'RKE2 (via Lima) install complete.'
+  echo "Ingress reachable from the Mac at: http://${node_ip}/   (no port-forward)"
   echo "Use it with: $0 kubectl get nodes"
 }
 
