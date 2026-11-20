@@ -1,0 +1,16 @@
+services:
+  openbao:
+    image: openbao/openbao:latest
+    container_name: openbao
+    restart: unless-stopped
+    ports:
+      - "8200:8200"
+    cap_add:
+      - IPC_LOCK
+    environment:
+      BAO_ADDR: "http://127.0.0.1:8200"
+    volumes:
+      - ./config:/openbao/config
+      - ./data:/openbao/data
+      - ./logs:/openbao/logs
+    command: server
