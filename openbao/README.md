@@ -11,6 +11,10 @@ Vault) running in Docker with integrated **Raft** storage (persistent, HA-capabl
 > OpenBao uses the same HCL config and API as Vault, but the binary is `bao`,
 > env vars are `BAO_*`, and in-container paths are under `/openbao`.
 
+> 🔑 **Credentials** (root token + unseal keys) are kept in `CREDENTIALS.local.md`,
+> which is **gitignored** — never commit it. Move those keys to a real secret
+> manager and revoke the root token once proper auth is configured (see §8).
+
 ---
 
 ## 1. Layout
