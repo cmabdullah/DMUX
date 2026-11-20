@@ -495,6 +495,39 @@ Each script writes its kubeconfig to a different place:
 export KUBECONFIG=~/.kube/rke2-lima.yaml
 ```
 
+> **Important — `rke2-mac.sh` uses a *separate* kubeconfig.** It writes
+> `~/.kube/rke2-lima.yaml` (server `https://127.0.0.1:6443`) and does **not** merge into your
+> default `~/.kube/config`, so it won't clobber other contexts (OrbStack, k3d, …). A plain
+> `kubectl …` with no `KUBECONFIG` set therefore talks to whatever your *default* context is —
+> **not** the RKE2 cluster.
+
+**Three ways to run `kubectl` against the RKE2 cluster — pick one:**
+
+```bash
+# A) point this shell at it (add to ~/.zshrc to make it stick)
+export KUBECONFIG=~/.kube/rke2-lima.yaml
+kubectl get deployments
+
+# B) the script's passthrough — no env needed
+./rke2-mac.sh kubectl get deployments
+
+# C) merge into the default config so plain `kubectl` sees it, then switch context
+KUBECONFIG=~/.kube/config:~/.kube/rke2-lima.yaml kubectl config view --flatten > ~/.kube/config.new
+mv ~/.kube/config.new ~/.kube/config
+kubectl config use-context default     # RKE2's context is named "default"
+```
+
+> **Gotcha — `connection refused` on port `26443` (or any port ≠ `6443`).**
+> That means `kubectl` is hitting the **wrong cluster** (e.g. OrbStack lives on `127.0.0.1:26443`),
+> not RKE2. It is **not** an RKE2 failure — the ingress URL (`http://192.168.64.2/`) keeps working
+> because Traefik serves on the node independently of your kubeconfig. Fix it with A, B, or C
+> above. Check what you're pointed at with:
+> ```bash
+> kubectl config current-context
+> kubectl config view --minify -o jsonpath='{.clusters[0].cluster.server}{"\n"}'
+> ```
+> RKE2's server must read `https://127.0.0.1:6443`.
+
 ### 12.2 The one-line health check
 
 ```bash
