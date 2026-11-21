@@ -1,0 +1,20 @@
+
+# AppRole credentials for authenticating the in-cluster app to host OpenBao.
+# Fill in the values produced by the OpenBao setup (see README / plan §10):
+#   role_id  : bao read  auth/approle/role/panda-app/role-id
+#   secret_id: bao write -f auth/approle/role/panda-app/secret-id
+#
+# Create it imperatively instead of committing real values:
+#   kubectl -n panda create secret generic openbao-approle \
+#     --from-literal=role-id=<ROLE_ID> \
+#     --from-literal=secret-id=<SECRET_ID>
+apiVersion: v1
+
+kind: Secret
+metadata:
+  name: openbao-approle
+  namespace: panda
+type: Opaque
+stringData:
+  role-id: "REPLACE_WITH_ROLE_ID"
+  secret-id: "REPLACE_WITH_SECRET_ID"
