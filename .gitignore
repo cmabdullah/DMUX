@@ -1,3 +1,4 @@
 openbao/data/
 openbao/logs/
 openbao/CREDENTIALS.local.md
+panda-app/deploy/APPROLE.local.md
