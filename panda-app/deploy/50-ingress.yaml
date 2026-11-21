@@ -1,0 +1,17 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: panda-app
+  namespace: panda
+spec:
+  rules:
+    - host: panda.local # adjust to your ingress setup
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: panda-app
+                port:
+                  number: 80
