@@ -1,0 +1,43 @@
+spring:
+  application:
+    name: panda-app
+
+  # Pull the DB credentials from OpenBao (Vault-compatible API) running on the HOST.
+  # Keys `username` and `password` at secret/panda/db become Spring properties.
+  config:
+    import: "vault://secret/panda/db"
+
+  cloud:
+    vault:
+      # OpenBao runs on the host machine, outside the cluster -> reach it via host IP.
+      uri: ${BAO_ADDR:http://host.docker.internal:8200}
+      # AppRole: the correct auth method when OpenBao is OUTSIDE the cluster.
+      authentication: APPROLE
+      app-role:
+        app-role-path: approle
+        role-id: ${BAO_ROLE_ID}
+        secret-id: ${BAO_SECRET_ID}
+      kv:
+        enabled: false            # using spring.config.import=vault://... instead
+      fail-fast: true             # fail startup if OpenBao is unreachable
+
+  datasource:
+    # Postgres also runs on the host machine -> reach it via host IP.
+    url: jdbc:postgresql://${DB_HOST}:${DB_PORT:5432}/${DB_NAME:panda}
+    username: ${username}         # from OpenBao secret/panda/db
+    password: ${password}         # from OpenBao secret/panda/db
+    hikari:
+      connection-timeout: 10000
+
+server:
+  port: ${PORT:8080}
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health
+  endpoint:
+    health:
+      probes:
+        enabled: true

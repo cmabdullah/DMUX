@@ -1,15 +1,15 @@
 # ---- build ----
-FROM golang:1.27 AS build
+FROM maven:3.9-eclipse-temurin-21 AS build
 WORKDIR /src
-COPY go.mod go.sum* ./
-RUN go mod download || true
-COPY . .
-RUN go mod tidy
-RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o /panda-app ./
+COPY pom.xml .
+RUN mvn -q -B dependency:go-offline
+COPY src ./src
+RUN mvn -q -B clean package -DskipTests
 
 # ---- runtime ----
-FROM gcr.io/distroless/static-debian12:nonroot
-COPY --from=build /panda-app /panda-app
+FROM eclipse-temurin:21-jre
+WORKDIR /app
+COPY --from=build /src/target/panda-app.jar /app/app.jar
 EXPOSE 8080
-USER nonroot:nonroot
-ENTRYPOINT ["/panda-app"]
+USER 1000:1000
+ENTRYPOINT ["java", "-jar", "/app/app.jar"]
