@@ -5,7 +5,16 @@ A Go web service that exposes a **"Hello, World"** endpoint reporting that the
 Kubernetes (RKE2)**, and its Postgres **username/password are loaded from OpenBao**
 (not baked into the image or a plain K8s Secret).
 
-- **Status:** ✅ Implemented — code + manifests written, image builds (`panda-app:0.1.0`, ~20MB). ⏳ K8s deploy pending (cluster was down at build time).
+- **Status:** ✅ Implemented as **Spring Boot** (converted from Go) and **deployed + verified in the RKE2 cluster** (2026-11-21). Pod reads creds from host OpenBao via AppRole and connects to host Postgres; `GET /` returns `database:connected`.
+
+> **⚠️ Implementation diverged from this plan — see [`README.md`](./README.md) for the authoritative, as-built design.**
+> Key changes after the plan was written:
+> - **Language:** Go → **Spring Boot 3.3 (Java 21)**, using **Spring Cloud Vault** for OpenBao.
+> - **Topology:** OpenBao **and** Postgres run on the **host machine** (not in-cluster); the app runs in RKE2 and reaches them over the host IP.
+> - **Auth:** Kubernetes auth → **AppRole** (the correct choice when OpenBao is outside the cluster).
+> - **Postgres:** the in-cluster Postgres manifest was removed (DB is on the host).
+> - **Verified:** the built image was run against host OpenBao + Postgres and returned `{"database":"connected"}`.
+> The Go sections below (§6–§9) are retained for historical context only.
 - **Date:** 2026-11-21
 - **Branch:** `OpenBao`
 - **DB credentials:** `POSTGRES_DB=panda`, `POSTGRES_USER=panda`, `POSTGRES_PASSWORD=panda`

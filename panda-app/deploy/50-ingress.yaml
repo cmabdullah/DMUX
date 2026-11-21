@@ -1,14 +1,31 @@
+# Path-based routing on the default host (same style as ingress-three-apps.yaml).
+# panda-app is reachable at  http://<node-ip>/panda  — no Host header needed.
+#
+# The demo apps serve content AT their subpath; panda-app serves at "/", so a
+# StripPrefix middleware rewrites /panda -> / before the request hits the app.
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: panda-stripprefix
+  namespace: panda
+spec:
+  stripPrefix:
+    prefixes:
+      - /panda
+---
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
   name: panda-app
   namespace: panda
+  annotations:
+    traefik.ingress.kubernetes.io/router.middlewares: panda-panda-stripprefix@kubernetescrd
 spec:
+  ingressClassName: traefik
   rules:
-    - host: panda.local # adjust to your ingress setup
-      http:
+    - http:
         paths:
-          - path: /
+          - path: /panda
             pathType: Prefix
             backend:
               service:

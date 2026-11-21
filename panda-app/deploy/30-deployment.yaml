@@ -13,23 +13,37 @@ spec:
       labels:
         app: panda-app
     spec:
-      serviceAccountName: panda-app # identity OpenBao binds its role to
       containers:
         - name: panda-app
-          image: panda-app:0.1.0 # or <registry>/panda-app:0.1.0
+          image: panda-app:0.2.0 # or <registry>/panda-app:0.2.0
           imagePullPolicy: IfNotPresent
           ports:
             - containerPort: 8080
           env:
-            - { name: BAO_ADDR, value: "http://openbao.openbao.svc:8200" }
-            - { name: BAO_ROLE, value: "panda-app" }
-            - { name: BAO_KV_MOUNT, value: "secret" }
-            - { name: BAO_KV_PATH, value: "panda/db" }
-            - { name: DB_HOST, value: "postgres.panda.svc" }
+            # OpenBao + Postgres run on the HOST machine. Set HOST_IP to an address
+            # the pods can route to (e.g. the node/host IP; verify per your RKE2 setup).
+            - { name: BAO_ADDR, value: "http://192.168.64.1:8200" }
+            - { name: DB_HOST, value: "192.168.64.1" }
             - { name: DB_PORT, value: "5432" }
             - { name: DB_NAME, value: "panda" }
+            # AppRole credentials from the openbao-approle Secret
+            - name: BAO_ROLE_ID
+              valueFrom:
+                secretKeyRef:
+                  name: openbao-approle
+                  key: role-id
+            - name: BAO_SECRET_ID
+              valueFrom:
+                secretKeyRef:
+                  name: openbao-approle
+                  key: secret-id
           readinessProbe:
             httpGet:
-              path: /healthz
+              path: /actuator/health/readiness
               port: 8080
-            initialDelaySeconds: 5
+            initialDelaySeconds: 20
+          livenessProbe:
+            httpGet:
+              path: /actuator/health/liveness
+              port: 8080
+            initialDelaySeconds: 30

@@ -26,10 +26,19 @@ startup via **Spring Cloud Vault** — never baked into the image, env, or manif
 
 ## Status
 
-- ✅ Spring Boot app, Dockerfile, K8s manifests implemented; **image builds** (`panda-app:0.2.0`).
-- ✅ **OpenBao AppRole + host Postgres flow verified on the host**: AppRole login →
-  read `secret/panda/db` → `psql` connects → `db-connection-established`. Least-privilege confirmed.
-- ⏳ **In-cluster deploy pending** — RKE2 was unreachable at build time. Manifests + steps are ready.
+- ✅ **Deployed and verified in the RKE2 cluster** (2026-11-21). Pod `Running 1/1`; the
+  in-cluster app does AppRole login to host OpenBao (`192.168.64.1:8200`), reads
+  `secret/panda/db`, and connects to host Postgres (`192.168.64.1:5432`).
+- ✅ Reachable at **`http://192.168.64.2/panda`** (path-based Traefik routing, no Host
+  header — same style as `ingress-three-apps.yaml`) returns
+  `{"message":"Hello, World","database":"connected",...}`.
+- ✅ Image `panda-app:0.2.0` (linux/arm64) imported into the VM's RKE2 containerd.
+
+### Environment specifics (this host)
+
+- Cluster: RKE2 in a Lima VM (`rke2`), node `lima-rke2` @ `192.168.64.2`.
+- Host (Mac) on the vmnet: `192.168.64.1` — used for `BAO_ADDR` and `DB_HOST`.
+- kubectl: use `./rke2-mac.sh kubectl ...` (its kubeconfig), not the default context.
 
 ---
 
