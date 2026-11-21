@@ -5,14 +5,34 @@
 at `http://192.168.64.1:8200`.
 
 > **Security:** real `role_id`, `secret_id`, tokens, and unseal keys are **not** in this
-> file. Examples use `<PLACEHOLDER>` / sample UUIDs from a throwaway `demo-role`. Live
-> credentials live in gitignored files.
+> file. Examples use `<PLACEHOLDER>` / sample UUIDs. Live credentials live in gitignored
+> files (`openbao/CREDENTIALS.local.md`, `panda-app/deploy/APPROLE.local.md`).
+
+---
+
+## Shared setup for the commands below
+
+Every step shows **two equivalent forms**: the `bao` CLI and a complete `curl`.
+
+```bash
+# --- common env ---
+export BAO_ADDR=http://127.0.0.1:8200          # host OpenBao
+export VAULT_TOKEN=<root-token>                # setup only; from CREDENTIALS.local.md
+# OpenBao's HTTP header is X-Vault-Token (Vault-compatible API).
+
+# The CLI runs inside the container on this host:
+R() { docker exec -e BAO_ADDR=$BAO_ADDR -e BAO_TOKEN=$VAULT_TOKEN openbao "$@"; }
+# curl runs straight from the host against :8200.
+```
+
+> **Write semantics:** OpenBao accepts `POST` **or** `PUT` for writes. `LIST` is a real verb
+> (or `GET ...?list=true`). Reads are `GET`. All bodies are JSON.
 
 ---
 
 ## Part A — AppRole, step by step
 
-AppRole has **four** distinct concepts. Keep them straight:
+AppRole has **four** distinct concepts:
 
 | Concept       | Analogy                | Created when                    | Mutable?              | Secret?             |
 |---------------|------------------------|---------------------------------|-----------------------|---------------------|
@@ -21,300 +41,367 @@ AppRole has **four** distinct concepts. Keep them straight:
 | **secret_id** | password               | each *write* to `.../secret-id` | new every call        | **yes**             |
 | **token**     | session cookie         | at *login*                      | expires (`token_ttl`) | **yes**             |
 
-All `bao` commands below run against the host container with the **root token** (setup only):
-
-```bash
-ROOT=<root-token>            # from openbao/CREDENTIALS.local.md
-R() { docker exec -e BAO_ADDR=http://127.0.0.1:8200 -e BAO_TOKEN="$ROOT" openbao "$@"; }
-```
-
 ---
 
-### Step 0 — Prerequisite: enable AppRole + write the policy
+### Step 0a — Enable the AppRole auth method
 
-**Enable the AppRole auth method** (mounts it at `auth/approle/`):
+**CLI**
 
 ```bash
 R bao auth enable approle
 ```
 
-- HTTP: `POST /v1/sys/auth/approle`  body `{"type":"approle"}`
-- Effect: a new auth backend appears (see `bao auth list`).
+**curl**
 
-**Write the policy** the role will hand out (least-privilege read):
+```bash
+curl -sS -X POST \
+  -H "X-Vault-Token: $VAULT_TOKEN" \
+  -d '{"type":"approle"}' \
+  "$BAO_ADDR/v1/sys/auth/approle"
+```
+
+- Endpoint: `POST /v1/sys/auth/approle`  → `204 No Content`
+- Mounts the method at `auth/approle/`. (Re-enabling an existing path returns `400 path is already in use`.)
+
+### Step 0b — Write the policy the role will grant
+
+**CLI**
 
 ```bash
 printf 'path "secret/data/panda/db" { capabilities = ["read"] }\n' \
-  | docker exec -i -e BAO_ADDR=http://127.0.0.1:8200 -e BAO_TOKEN="$ROOT" \
+  | docker exec -i -e BAO_ADDR=$BAO_ADDR -e BAO_TOKEN=$VAULT_TOKEN \
       openbao bao policy write panda-app -
 ```
 
-- HTTP: `PUT /v1/sys/policies/acl/panda-app`  body
-  `{"policy":"path \"secret/data/panda/db\" {capabilities=[\"read\"]}"}`
-- Note the `secret/data/...` prefix — KV **v2** stores data under `data/` (ACLs must match that).
+**curl** (policy is a JSON string field — note the escaped quotes)
+
+```bash
+curl -sS -X PUT \
+  -H "X-Vault-Token: $VAULT_TOKEN" \
+  -d '{"policy":"path \"secret/data/panda/db\" { capabilities = [\"read\"] }"}' \
+  "$BAO_ADDR/v1/sys/policies/acl/panda-app"
+```
+
+- Endpoint: `PUT /v1/sys/policies/acl/panda-app` → `204 No Content`
+- `secret/data/...` — KV **v2** stores values under `data/`, so ACL paths must include it.
+
+**Verify (curl):**
+
+```bash
+curl -sS -H "X-Vault-Token: $VAULT_TOKEN" "$BAO_ADDR/v1/sys/policies/acl/panda-app"
+# {"data":{"name":"panda-app","policy":"path \"secret/data/panda/db\" { capabilities = [\"read\"] }\n", ...}}
+```
 
 ---
 
 ### Step 1 — Create the role
 
+**CLI**
+
 ```bash
 R bao write auth/approle/role/panda-app \
-  token_policies=panda-app \
-  token_ttl=1h \
-  token_max_ttl=4h
+  token_policies=panda-app token_ttl=1h token_max_ttl=4h
 ```
 
-- **HTTP:** `POST /v1/auth/approle/role/panda-app`
-- **Request body:**
-  ```json
-  { "token_policies": "panda-app", "token_ttl": "1h", "token_max_ttl": "4h" }
-  ```
-- **Response:** `204 No Content` (CLI prints `Success! Data written to: auth/approle/role/panda-app`)
-- **What happens:** a login role named `panda-app` is created. A **role_id is auto-generated
-  and stored with it**. Tokens issued via this role will carry the `panda-app` policy and
-  live 1h (renewable up to 4h).
+**curl**
 
-Key role parameters:
+```bash
+curl -sS -X POST \
+  -H "X-Vault-Token: $VAULT_TOKEN" \
+  -d '{"token_policies":"panda-app","token_ttl":"1h","token_max_ttl":"4h"}' \
+  "$BAO_ADDR/v1/auth/approle/role/panda-app"
+```
 
-| Param                         | Meaning                             | Value here     | Prod suggestion    |
-|-------------------------------|-------------------------------------|----------------|--------------------|
-| `token_policies`              | policies granted to the login token | `panda-app`    | least-privilege    |
-| `token_ttl` / `token_max_ttl` | token lifetime / cap                | 1h / 4h        | short              |
-| `secret_id_ttl`               | how long a secret_id is valid       | `0` (never) ⚠️ | e.g. `24h`         |
-| `secret_id_num_uses`          | max logins per secret_id            | `0` (∞) ⚠️     | `1` for single-use |
-| `token_num_uses`              | max uses of issued token            | `0` (∞)        | limit if possible  |
-| `secret_id_bound_cidrs`       | restrict secret_id by source IP     | —              | cluster subnet     |
-| `token_bound_cidrs`           | restrict token use by source IP     | —              | cluster subnet     |
+- Endpoint: `POST /v1/auth/approle/role/panda-app` → `204 No Content`
+- Creates the role and **auto-generates its role_id**. Tokens minted via this role carry the
+  `panda-app` policy, TTL 1h (max 4h).
+
+Key parameters:
+
+| Param                                         | Meaning                     | Value here     | Prod suggestion |
+|-----------------------------------------------|-----------------------------|----------------|-----------------|
+| `token_policies`                              | policies on the login token | `panda-app`    | least-privilege |
+| `token_ttl` / `token_max_ttl`                 | token lifetime / cap        | 1h / 4h        | short           |
+| `secret_id_ttl`                               | secret_id validity          | `0` (never) ⚠️ | e.g. `24h`      |
+| `secret_id_num_uses`                          | logins per secret_id        | `0` (∞) ⚠️     | `1` single-use  |
+| `token_num_uses`                              | uses per token              | `0` (∞)        | limit           |
+| `secret_id_bound_cidrs` / `token_bound_cidrs` | restrict by source IP       | —              | cluster subnet  |
 
 ---
 
 ### Step 2 — Inspect the role (optional)
 
+**CLI**
+
 ```bash
 R bao read auth/approle/role/panda-app
 ```
 
-- **HTTP:** `GET /v1/auth/approle/role/panda-app`
-- **Response (abridged):**
-  ```json
-  { "data": { "token_policies": ["panda-app"], "token_ttl": 3600,
-              "secret_id_ttl": 0, "secret_id_num_uses": 0 } }
-  ```
+**curl**
+
+```bash
+curl -sS -H "X-Vault-Token: $VAULT_TOKEN" \
+  "$BAO_ADDR/v1/auth/approle/role/panda-app"
+```
+
+- Endpoint: `GET /v1/auth/approle/role/panda-app`
+- Response (abridged): `{"data":{"token_policies":["panda-app"],"token_ttl":3600,"secret_id_ttl":0,...}}`
 
 ---
 
 ### Step 3 — Read the role_id (stable)
 
+**CLI**
+
 ```bash
 R bao read auth/approle/role/panda-app/role-id
-# Key      Value
-# role_id  491a42ed-f8ef-be78-4145-4f24664fe559   (example)
 ```
 
-- **HTTP:** `GET /v1/auth/approle/role/panda-app/role-id`
-- **Response:** `{ "data": { "role_id": "491a42ed-..." } }`
-- **Important:** reading is **idempotent** — same value every time, nothing is generated.
-  The role_id is the stable *identifier* (like a username). Safe-ish to put in app config.
+**curl**
+
+```bash
+curl -sS -H "X-Vault-Token: $VAULT_TOKEN" \
+  "$BAO_ADDR/v1/auth/approle/role/panda-app/role-id"
+```
+
+- Endpoint: `GET /v1/auth/approle/role/panda-app/role-id`
+- **Real response** from this instance:
+  ```json
+  { "data": { "role_id": "8284877b-8686-06f8-a13d-a150bfa64291" } }
+  ```
+- Idempotent — reading never changes it. Extract just the value with:
+  ```bash
+  curl -sS -H "X-Vault-Token: $VAULT_TOKEN" \
+    "$BAO_ADDR/v1/auth/approle/role/panda-app/role-id" | python3 -c "import json,sys;print(json.load(sys.stdin)['data']['role_id'])"
+  ```
 
 ---
 
 ### Step 4 — Generate a secret_id (the credential)
 
+**CLI**
+
 ```bash
 R bao write -f auth/approle/role/panda-app/secret-id
-# secret_id           2d43044c-93ba-a6ff-2e36-7d5df8428ad7   (example)
-# secret_id_accessor  7294dad0-e0b2-bde9-d2c9-28184bd89ee8
 ```
 
-- **HTTP:** `POST /v1/auth/approle/role/panda-app/secret-id`  (body `{}`; `-f` = force, no input)
-- **Response:**
+**curl** (empty JSON body)
+
+```bash
+curl -sS -X POST \
+  -H "X-Vault-Token: $VAULT_TOKEN" \
+  -d '{}' \
+  "$BAO_ADDR/v1/auth/approle/role/panda-app/secret-id"
+```
+
+- Endpoint: `POST /v1/auth/approle/role/panda-app/secret-id`
+- Response:
   ```json
   { "data": { "secret_id": "2d43044c-...", "secret_id_accessor": "7294dad0-...",
               "secret_id_ttl": 0, "secret_id_num_uses": 0 } }
   ```
-- **Important:** **every call mints a NEW secret_id.** This is how you **rotate** — generate
-  a fresh one, switch the app to it, then revoke the old. The `secret_id_accessor` lets you
-  revoke a specific secret_id *without* knowing its value:
+- **Every call mints a NEW secret_id** → this is how you rotate.
+- Response-wrapped (prod — raw secret_id never in plaintext): add the wrap header:
   ```bash
-  R bao write auth/approle/role/panda-app/secret-id-accessor/destroy accessor=<accessor>
-  # HTTP: POST /v1/auth/approle/role/panda-app/secret-id-accessor/destroy
+  curl -sS -X POST -H "X-Vault-Token: $VAULT_TOKEN" -H "X-Vault-Wrap-TTL: 120s" \
+    -d '{}' "$BAO_ADDR/v1/auth/approle/role/panda-app/secret-id"
+  # -> {"wrap_info":{"token":"<unwrap-token>","ttl":120,...}}   (app unwraps it once)
   ```
-- **Tip (prod):** add `-wrap-ttl=120s` to get a *response-wrapped* secret_id — a one-time
-  unwrap token you hand to the app so the raw secret_id never sits in plaintext.
+- Revoke a specific secret_id by its accessor (no value needed):
+  ```bash
+  curl -sS -X POST -H "X-Vault-Token: $VAULT_TOKEN" \
+    -d '{"secret_id_accessor":"<ACCESSOR>"}' \
+    "$BAO_ADDR/v1/auth/approle/role/panda-app/secret-id-accessor/destroy"
+  ```
 
 ---
 
 ### Step 5 — Login (role_id + secret_id → token)
 
+**CLI**
+
 ```bash
-R bao write auth/approle/login \
-  role_id=<ROLE_ID> secret_id=<SECRET_ID>
+R bao write auth/approle/login role_id=<ROLE_ID> secret_id=<SECRET_ID>
 ```
 
-- **HTTP:** `POST /v1/auth/approle/login`
-- **Request body:**
-  ```json
-  { "role_id": "<ROLE_ID>", "secret_id": "<SECRET_ID>" }
-  ```
-- **Response (token redacted):**
+**curl** (NO token header — this is how you *get* a token)
+
+```bash
+curl -sS -X POST \
+  -d '{"role_id":"<ROLE_ID>","secret_id":"<SECRET_ID>"}' \
+  "$BAO_ADDR/v1/auth/approle/login"
+```
+
+- Endpoint: `POST /v1/auth/approle/login`
+- **Real response** (token/accessor redacted):
   ```json
   { "auth": {
       "client_token": "<REDACTED>",
       "accessor": "<REDACTED>",
-      "token_policies": ["default", "panda-app"],
+      "token_policies": ["default","panda-app"],
       "lease_duration": 3600,
       "renewable": true,
       "metadata": { "role_name": "panda-app" } } }
   ```
-- **What happens:** both halves together prove identity → OpenBao returns a token carrying
-  the role's policies. Neither role_id nor secret_id alone is sufficient (that split is the
-  whole point of AppRole).
+- Capture the token for the next call:
+  ```bash
+  APP_TOKEN=$(curl -sS -X POST \
+    -d '{"role_id":"<ROLE_ID>","secret_id":"<SECRET_ID>"}' \
+    "$BAO_ADDR/v1/auth/approle/login" \
+    | python3 -c "import json,sys;print(json.load(sys.stdin)['auth']['client_token'])")
+  ```
 
 ---
 
 ### Step 6 — Use the token to read the secret
 
+**CLI**
+
 ```bash
-R bao kv get secret/panda/db        # with X-Vault-Token: <client_token>
+BAO_TOKEN=$APP_TOKEN R bao kv get secret/panda/db
 ```
 
-- **HTTP:** `GET /v1/secret/data/panda/db`  header `X-Vault-Token: <client_token>`
-- **Response:** values nested at `.data.data` (KV v2):
+**curl** (use the AppRole token, not root)
+
+```bash
+curl -sS -H "X-Vault-Token: $APP_TOKEN" \
+  "$BAO_ADDR/v1/secret/data/panda/db"
+```
+
+- Endpoint: `GET /v1/secret/data/panda/db`  (the `data/` segment = KV **v2**)
+- **Real response** — values nested at `.data.data`:
   ```json
-  { "data": { "data": { "username": "panda", "password": "panda" },
-              "metadata": { "version": 1 } } }
+  { "data": {
+      "data": { "password": "panda", "username": "panda" },
+      "metadata": { "version": 1, "created_time": "2026-11-21T05:01:33Z", "destroyed": false } } }
+  ```
+- Extract one field:
+  ```bash
+  curl -sS -H "X-Vault-Token: $APP_TOKEN" "$BAO_ADDR/v1/secret/data/panda/db" \
+    | python3 -c "import json,sys;print(json.load(sys.stdin)['data']['data']['password'])"
   ```
 
-> In production this whole chain (Steps 5–6, plus token renewal) is performed automatically
-> by **Spring Cloud Vault** inside the app, using `BAO_ROLE_ID` / `BAO_SECRET_ID` from the
-> `openbao-approle` Kubernetes Secret.
+> In production Steps 5–6 (+ token renewal) are done automatically by **Spring Cloud Vault**
+> using `BAO_ROLE_ID` / `BAO_SECRET_ID` from the `openbao-approle` Kubernetes Secret.
 
 ---
 
-### Lifecycle: rotating a secret_id
+### Lifecycle — rotate a secret_id (complete)
 
 ```bash
-# 1. mint a new secret_id
-NEW=$(R bao write -f -field=secret_id auth/approle/role/panda-app/secret-id)
+# 1. mint a new secret_id (curl)
+NEW=$(curl -sS -X POST -H "X-Vault-Token: $VAULT_TOKEN" -d '{}' \
+  "$BAO_ADDR/v1/auth/approle/role/panda-app/secret-id" \
+  | python3 -c "import json,sys;print(json.load(sys.stdin)['data']['secret_id'])")
+
 # 2. update the K8s Secret
-kubectl -n panda create secret generic openbao-approle \
+./rke2-mac.sh kubectl -n panda create secret generic openbao-approle \
   --from-literal=role-id=<ROLE_ID> --from-literal=secret-id="$NEW" \
   --dry-run=client -o yaml | ./rke2-mac.sh kubectl apply -f -
+
 # 3. restart the app to pick it up
 ./rke2-mac.sh kubectl -n panda rollout restart deploy/panda-app
-# 4. (optional) destroy the old secret_id by its accessor
+
+# 4. (optional) destroy the old secret_id by accessor
+curl -sS -X POST -H "X-Vault-Token: $VAULT_TOKEN" \
+  -d '{"secret_id_accessor":"<OLD_ACCESSOR>"}' \
+  "$BAO_ADDR/v1/auth/approle/role/panda-app/secret-id-accessor/destroy"
 ```
 
 ---
 
-## Part B — OpenBao API endpoint reference
+## Part B — OpenBao API endpoint reference (with curl)
 
-OpenBao exposes a Vault-compatible HTTP API, all under `/v1/...`. Three broad families:
-**system** (`sys/*`), **auth methods** (`auth/<method>/*`), and **secrets engines**
-(`<mount>/*`). `LIST` is a real HTTP verb here (or `GET ...?list=true`).
+All under `/v1/...`. Three families: **system** (`sys/*`), **auth** (`auth/<method>/*`),
+**secrets engines** (`<mount>/*`).
 
 ### Live state on this instance
 
 ```
-Secrets engines (bao secrets list):   cubbyhole/  identity/  kubernetes/  secret/(kv v2)  sys/
-Auth methods   (bao auth list):       approle/    token/
-Policies       (bao policy list):     default  panda-app  root
+Secrets engines: cubbyhole/  identity/  kubernetes/  secret/(kv v2)  sys/
+Auth methods:    approle/    token/
+Policies:        default  panda-app  root
 ```
 
-### B.1 System endpoints (`/v1/sys/*`) — control plane
+### B.1 System endpoints (`/v1/sys/*`)
 
-| Endpoint                                 | Method         | Use case                                                          | Used here?          |
-|------------------------------------------|----------------|-------------------------------------------------------------------|---------------------|
-| `/v1/sys/health`                         | GET            | Health/readiness: initialized, sealed, active/standby             | ✅ reachability test |
-| `/v1/sys/seal-status`                    | GET            | Seal state + unseal progress                                      | —                   |
-| `/v1/sys/init`                           | GET/PUT        | Check init status / initialize (returns unseal keys + root token) | ✅ init              |
-| `/v1/sys/unseal`                         | PUT            | Submit an unseal key (repeat to threshold)                        | ✅ unseal ×3         |
-| `/v1/sys/seal`                           | POST           | Manually re-seal                                                  | —                   |
-| `/v1/sys/mounts`                         | GET/LIST       | List secrets engines                                              | ✅ (list)            |
-| `/v1/sys/mounts/<path>`                  | POST/DELETE    | Enable/disable a secrets engine                                   | ✅ enable kv v2      |
-| `/v1/sys/auth`                           | GET/LIST       | List auth methods                                                 | ✅ (list)            |
-| `/v1/sys/auth/<path>`                    | POST/DELETE    | Enable/disable an auth method                                     | ✅ enable approle    |
-| `/v1/sys/policies/acl`                   | LIST           | List ACL policies                                                 | ✅                   |
-| `/v1/sys/policies/acl/<name>`            | GET/PUT/DELETE | Read/write/delete a policy                                        | ✅ write panda-app   |
-| `/v1/sys/leases/*`                       | POST           | Look up / renew / revoke leases                                   | — (SCV renews)      |
-| `/v1/sys/audit` / `/v1/sys/audit/<path>` | GET/PUT/DELETE | Manage audit log devices                                          | ⬜ recommended       |
-| `/v1/sys/storage/raft/*`                 | GET/POST       | Raft config, join, snapshot (backup/restore)                      | ⬜ recommended       |
-| `/v1/sys/capabilities-self`              | POST           | What can my token do on a path?                                   | —                   |
-| `/v1/sys/tools/*`                        | POST           | Random bytes, hashing utilities                                   | —                   |
+| Endpoint                        | Method         | Use case                       | curl                                                                                                                                                  |
+|---------------------------------|----------------|--------------------------------|-------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `/v1/sys/health`                | GET            | health (init/sealed/active)    | `curl -sS $BAO_ADDR/v1/sys/health`                                                                                                                    |
+| `/v1/sys/seal-status`           | GET            | seal state / unseal progress   | `curl -sS $BAO_ADDR/v1/sys/seal-status`                                                                                                               |
+| `/v1/sys/init`                  | PUT            | initialize                     | `curl -sS -X PUT -d '{"secret_shares":5,"secret_threshold":3}' $BAO_ADDR/v1/sys/init`                                                                 |
+| `/v1/sys/unseal`                | PUT            | submit unseal key (×threshold) | `curl -sS -X PUT -d '{"key":"<unseal-key>"}' $BAO_ADDR/v1/sys/unseal`                                                                                 |
+| `/v1/sys/mounts`                | GET            | list secrets engines           | `curl -sS -H "X-Vault-Token: $VAULT_TOKEN" $BAO_ADDR/v1/sys/mounts`                                                                                   |
+| `/v1/sys/mounts/<path>`         | POST           | enable engine                  | `curl -sS -X POST -H "X-Vault-Token: $VAULT_TOKEN" -d '{"type":"kv","options":{"version":"2"}}' $BAO_ADDR/v1/sys/mounts/secret`                       |
+| `/v1/sys/auth`                  | GET            | list auth methods              | `curl -sS -H "X-Vault-Token: $VAULT_TOKEN" $BAO_ADDR/v1/sys/auth`                                                                                     |
+| `/v1/sys/auth/<path>`           | POST           | enable auth method             | `curl -sS -X POST -H "X-Vault-Token: $VAULT_TOKEN" -d '{"type":"approle"}' $BAO_ADDR/v1/sys/auth/approle`                                             |
+| `/v1/sys/policies/acl`          | LIST           | list policies                  | `curl -sS -H "X-Vault-Token: $VAULT_TOKEN" -X LIST $BAO_ADDR/v1/sys/policies/acl`                                                                     |
+| `/v1/sys/policies/acl/<name>`   | GET/PUT/DELETE | read/write/delete policy       | `curl -sS -H "X-Vault-Token: $VAULT_TOKEN" $BAO_ADDR/v1/sys/policies/acl/panda-app`                                                                   |
+| `/v1/sys/capabilities-self`     | POST           | what can my token do on a path | `curl -sS -X POST -H "X-Vault-Token: $VAULT_TOKEN" -d '{"paths":["secret/data/panda/db"]}' $BAO_ADDR/v1/sys/capabilities-self`                        |
+| `/v1/sys/storage/raft/snapshot` | GET            | **backup** raft                | `curl -sS -H "X-Vault-Token: $VAULT_TOKEN" $BAO_ADDR/v1/sys/storage/raft/snapshot -o bao.snap`                                                        |
+| `/v1/sys/audit/<path>`          | PUT            | enable audit device            | `curl -sS -X PUT -H "X-Vault-Token: $VAULT_TOKEN" -d '{"type":"file","options":{"file_path":"/openbao/logs/audit.log"}}' $BAO_ADDR/v1/sys/audit/file` |
 
-### B.2 Auth method endpoints (`/v1/auth/*`)
+### B.2 Auth endpoints (`/v1/auth/*`)
 
-**AppRole** (`auth/approle/`) — used by the app:
+| Endpoint                              | Method          | Use case              | curl                                                                                                           |
+|---------------------------------------|-----------------|-----------------------|----------------------------------------------------------------------------------------------------------------|
+| `/v1/auth/approle/role/<n>`           | POST/GET/DELETE | manage roles          | `curl -sS -H "X-Vault-Token: $VAULT_TOKEN" $BAO_ADDR/v1/auth/approle/role/panda-app`                           |
+| `/v1/auth/approle/role/<n>/role-id`   | GET             | read role_id          | `curl -sS -H "X-Vault-Token: $VAULT_TOKEN" $BAO_ADDR/v1/auth/approle/role/panda-app/role-id`                   |
+| `/v1/auth/approle/role/<n>/secret-id` | POST            | mint secret_id        | `curl -sS -X POST -H "X-Vault-Token: $VAULT_TOKEN" -d '{}' $BAO_ADDR/v1/auth/approle/role/panda-app/secret-id` |
+| `/v1/auth/approle/login`              | POST            | get token             | `curl -sS -X POST -d '{"role_id":"<R>","secret_id":"<S>"}' $BAO_ADDR/v1/auth/approle/login`                    |
+| `/v1/auth/token/lookup-self`          | GET             | inspect current token | `curl -sS -H "X-Vault-Token: $APP_TOKEN" $BAO_ADDR/v1/auth/token/lookup-self`                                  |
+| `/v1/auth/token/renew-self`           | POST            | renew current token   | `curl -sS -X POST -H "X-Vault-Token: $APP_TOKEN" -d '{}' $BAO_ADDR/v1/auth/token/renew-self`                   |
+| `/v1/auth/token/revoke-self`          | POST            | revoke current token  | `curl -sS -X POST -H "X-Vault-Token: $APP_TOKEN" $BAO_ADDR/v1/auth/token/revoke-self`                          |
 
-| Endpoint                                                  | Method               | Use case                               |
-|-----------------------------------------------------------|----------------------|----------------------------------------|
-| `/v1/auth/approle/role/<name>`                            | POST/GET/DELETE/LIST | Create/read/delete/list roles          |
-| `/v1/auth/approle/role/<name>/role-id`                    | GET/POST             | Read (or set) the stable role_id       |
-| `/v1/auth/approle/role/<name>/secret-id`                  | POST                 | Generate a new secret_id               |
-| `/v1/auth/approle/role/<name>/secret-id/lookup`           | POST                 | Inspect a secret_id (by value)         |
-| `/v1/auth/approle/role/<name>/secret-id-accessor/destroy` | POST                 | Revoke a secret_id by accessor         |
-| `/v1/auth/approle/login`                                  | POST                 | Exchange role_id+secret_id for a token |
-
-**Token** (`auth/token/`) — always present:
-
-| Endpoint                     | Method | Use case                                  |
-|------------------------------|--------|-------------------------------------------|
-| `/v1/auth/token/lookup-self` | GET    | Inspect the current token (policies, TTL) |
-| `/v1/auth/token/renew-self`  | POST   | Renew the current token's lease           |
-| `/v1/auth/token/create`      | POST   | Mint a child token                        |
-| `/v1/auth/token/revoke`      | POST   | Revoke a token                            |
-
-**Other common auth methods** (not enabled here, for reference):
-`auth/kubernetes/login` (pod SA-token login — would be used if OpenBao ran *in* the cluster),
-`auth/userpass/login/<user>`, `auth/ldap/login/<user>`, `auth/jwt|oidc/login`.
+*(Not enabled here but common: `POST /v1/auth/kubernetes/login` `{"role":"..","jwt":".."}`,
+`POST /v1/auth/userpass/login/<user>` `{"password":".."}`.)*
 
 ### B.3 Secrets engine endpoints
 
-**KV v2** (`secret/`) — used by the app. Note the `data/` / `metadata/` segments:
+**KV v2** (`secret/`) — note `data/` / `metadata/` segments:
 
-| Endpoint                     | Method   | Use case                             |
-|------------------------------|----------|--------------------------------------|
-| `/v1/secret/data/<path>`     | GET      | Read latest (or `?version=N`) secret |
-| `/v1/secret/data/<path>`     | POST     | Write/update a secret (new version)  |
-| `/v1/secret/data/<path>`     | DELETE   | Soft-delete latest version           |
-| `/v1/secret/metadata/<path>` | GET/LIST | Versions/metadata; list keys         |
-| `/v1/secret/metadata/<path>` | DELETE   | Permanently delete all versions      |
-| `/v1/secret/destroy/<path>`  | POST     | Destroy specific versions            |
-| `/v1/secret/config`          | GET/POST | Engine config (max versions, etc.)   |
+| Endpoint                  | Method   | Use case                   | curl                                                                                                                                        |
+|---------------------------|----------|----------------------------|---------------------------------------------------------------------------------------------------------------------------------------------|
+| `/v1/secret/data/<p>`     | GET      | read secret (`?version=N`) | `curl -sS -H "X-Vault-Token: $APP_TOKEN" $BAO_ADDR/v1/secret/data/panda/db`                                                                 |
+| `/v1/secret/data/<p>`     | POST     | write/update (new version) | `curl -sS -X POST -H "X-Vault-Token: $VAULT_TOKEN" -d '{"data":{"username":"panda","password":"panda"}}' $BAO_ADDR/v1/secret/data/panda/db` |
+| `/v1/secret/data/<p>`     | DELETE   | soft-delete latest         | `curl -sS -X DELETE -H "X-Vault-Token: $VAULT_TOKEN" $BAO_ADDR/v1/secret/data/panda/db`                                                     |
+| `/v1/secret/metadata/<p>` | GET/LIST | versions / list keys       | `curl -sS -H "X-Vault-Token: $VAULT_TOKEN" $BAO_ADDR/v1/secret/metadata/panda/db`                                                           |
+| `/v1/secret/metadata/<p>` | DELETE   | destroy all versions       | `curl -sS -X DELETE -H "X-Vault-Token: $VAULT_TOKEN" $BAO_ADDR/v1/secret/metadata/panda/db`                                                 |
 
-> KV **v1** (if mounted) is flat: `GET/POST/DELETE /v1/<mount>/<path>` (no `data/`).
+**Other engines (reference):**
 
-**Other engines worth knowing** (not used here):
-
-| Engine        | Representative endpoint          | Use case                                                                                             |
-|---------------|----------------------------------|------------------------------------------------------------------------------------------------------|
-| **database**  | `GET /v1/database/creds/<role>`  | **Dynamic**, short-lived DB credentials (rotated per lease) — the recommended upgrade from static KV |
-| **transit**   | `POST /v1/transit/encrypt/<key>` | Encryption-as-a-service (no key exposure); also for auto-unseal                                      |
-| **pki**       | `POST /v1/pki/issue/<role>`      | Issue short-lived TLS certs                                                                          |
-| **cubbyhole** | `GET/POST /v1/cubbyhole/<path>`  | Per-token private scratch (used for response-wrapping)                                               |
-| **identity**  | `/v1/identity/*`                 | Entities/groups across auth methods                                                                  |
+| Engine       | curl                                                                                                     | Use case                      |
+|--------------|----------------------------------------------------------------------------------------------------------|-------------------------------|
+| **database** | `curl -sS -H "X-Vault-Token: $T" $BAO_ADDR/v1/database/creds/<role>`                                     | dynamic, short-lived DB creds |
+| **transit**  | `curl -sS -X POST -H "X-Vault-Token: $T" -d '{"plaintext":"<b64>"}' $BAO_ADDR/v1/transit/encrypt/<key>`  | encryption as a service       |
+| **pki**      | `curl -sS -X POST -H "X-Vault-Token: $T" -d '{"common_name":"x.example"}' $BAO_ADDR/v1/pki/issue/<role>` | issue TLS certs               |
 
 ---
 
-## Part C — What this project actually calls
+## Part C — What this project actually calls (full curl)
 
+```bash
+export BAO_ADDR=http://127.0.0.1:8200
+export VAULT_TOKEN=<root>        # setup only
+
+# ---------- SETUP (operator, one-time) ----------
+curl -sS -X PUT  -d '{"secret_shares":5,"secret_threshold":3}' $BAO_ADDR/v1/sys/init
+curl -sS -X PUT  -d '{"key":"<unseal-key-1>"}' $BAO_ADDR/v1/sys/unseal   # ×3
+curl -sS -X POST -H "X-Vault-Token: $VAULT_TOKEN" -d '{"type":"kv","options":{"version":"2"}}' $BAO_ADDR/v1/sys/mounts/secret
+curl -sS -X POST -H "X-Vault-Token: $VAULT_TOKEN" -d '{"data":{"username":"panda","password":"panda"}}' $BAO_ADDR/v1/secret/data/panda/db
+curl -sS -X PUT  -H "X-Vault-Token: $VAULT_TOKEN" -d '{"policy":"path \"secret/data/panda/db\" { capabilities = [\"read\"] }"}' $BAO_ADDR/v1/sys/policies/acl/panda-app
+curl -sS -X POST -H "X-Vault-Token: $VAULT_TOKEN" -d '{"type":"approle"}' $BAO_ADDR/v1/sys/auth/approle
+curl -sS -X POST -H "X-Vault-Token: $VAULT_TOKEN" -d '{"token_policies":"panda-app","token_ttl":"1h","token_max_ttl":"4h"}' $BAO_ADDR/v1/auth/approle/role/panda-app
+curl -sS -H "X-Vault-Token: $VAULT_TOKEN" $BAO_ADDR/v1/auth/approle/role/panda-app/role-id
+curl -sS -X POST -H "X-Vault-Token: $VAULT_TOKEN" -d '{}' $BAO_ADDR/v1/auth/approle/role/panda-app/secret-id
+
+# ---------- RUNTIME (app, every startup — done by Spring Cloud Vault) ----------
+APP_TOKEN=$(curl -sS -X POST -d '{"role_id":"<R>","secret_id":"<S>"}' $BAO_ADDR/v1/auth/approle/login \
+  | python3 -c "import json,sys;print(json.load(sys.stdin)['auth']['client_token'])")
+curl -sS -H "X-Vault-Token: $APP_TOKEN" $BAO_ADDR/v1/secret/data/panda/db
+curl -sS -X POST -H "X-Vault-Token: $APP_TOKEN" -d '{}' $BAO_ADDR/v1/auth/token/renew-self
 ```
-SETUP (operator, root token, one-time)
-  PUT  /v1/sys/init                      -> keys + root token
-  PUT  /v1/sys/unseal            (×3)    -> unsealed
-  POST /v1/sys/mounts/secret            -> enable KV v2
-  POST /v1/secret/data/panda/db         -> store {username,password}
-  PUT  /v1/sys/policies/acl/panda-app   -> read-only policy
-  POST /v1/sys/auth/approle             -> enable AppRole
-  POST /v1/auth/approle/role/panda-app  -> create role
-  GET  /v1/auth/approle/role/panda-app/role-id    -> role_id
-  POST /v1/auth/approle/role/panda-app/secret-id  -> secret_id
 
-RUNTIME (app via Spring Cloud Vault, every startup)
-  POST /v1/auth/approle/login           -> client_token (TTL 1h)
-  GET  /v1/secret/data/panda/db         -> username/password
-  POST /v1/auth/token/renew-self        -> keep token alive
-```
+> From inside the cluster, replace `127.0.0.1` with `192.168.64.1` (the host IP on the Lima vmnet).
 
-See also: `PANDA-OPENBAO-REPORT.md` (overall system report) and
-`panda-app/README.md` (app runbook).
+See also: `PANDA-OPENBAO-REPORT.md` (overall system report) and `panda-app/README.md` (app runbook).
