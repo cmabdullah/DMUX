@@ -1,0 +1,3 @@
+collections:
+  - name: community.hashi_vault   # reads OpenBao (Vault-compatible API); needs python 'hvac'
+  - name: kubernetes.core         # writes K8s objects; needs python 'kubernetes'

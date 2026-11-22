@@ -1,0 +1,40 @@
+pipeline {
+  agent any
+
+  environment {
+    BAO_ADDR      = 'http://192.168.64.1:8200'
+    // Jenkins credentials (Secret text). secret_id MUST be a secret credential.
+    BAO_ROLE_ID   = credentials('openbao-panda-role-id')
+    BAO_SECRET_ID = credentials('openbao-panda-secret-id')
+    // kubeconfig provided as a Jenkins "Secret file" credential, materialized to a path:
+    KUBECONFIG    = credentials('rke2-kubeconfig')
+  }
+
+  stages {
+    stage('Install Ansible collections') {
+      steps {
+        sh 'ansible-galaxy collection install -r panda-app/ansible/requirements.yml'
+      }
+    }
+
+    stage('Sync secret: OpenBao -> K8s Secret') {
+      steps {
+        dir('panda-app/ansible') {
+          sh '''
+            ansible-playbook sync-secret.yaml \
+              -e bao_addr="$BAO_ADDR" \
+              -e bao_role_id="$BAO_ROLE_ID" \
+              -e bao_secret_id="$BAO_SECRET_ID"
+          '''
+        }
+      }
+    }
+
+    stage('Deploy app') {
+      steps {
+        sh 'kubectl --kubeconfig "$KUBECONFIG" apply -f panda-app/deploy/'
+        sh 'kubectl --kubeconfig "$KUBECONFIG" -n panda rollout status deploy/panda-app --timeout=120s'
+      }
+    }
+  }
+}

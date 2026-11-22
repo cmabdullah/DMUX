@@ -1,0 +1,6 @@
+# Non-secret config only. role_id/secret_id come from Jenkins (extra-vars) — never stored here.
+bao_addr: "{{ lookup('env', 'BAO_ADDR') | default('http://192.168.64.1:8200', true) }}"
+kv_mount: "secret"
+secret_path: "panda/db"
+app_namespace: "panda"
+kubeconfig_path: "{{ lookup('env', 'KUBECONFIG') }}"
