@@ -1,38 +1,38 @@
 # panda-app (Spring Boot)
 
 A Spring Boot web service that returns **"Hello, World"** plus a **Postgres
-connection** status. The Postgres username/password are loaded from **OpenBao** at
-startup via **Spring Cloud Vault** — never baked into the image, env, or manifests.
+connection** status. As of **v0.3.0** the app is **Vault-unaware**: its Postgres
+credentials arrive as env vars from a Kubernetes Secret (`panda-db-credentials`) that
+**Ansible populates from OpenBao at deploy time** (push-at-deploy). No Spring Cloud
+Vault, no agent — see `REFACTOR-PLAN-V3-ANSIBLE-JENKINS.md`.
 
 **Architecture (as deployed here):**
 
-- **App** runs in the **RKE2 Kubernetes cluster**.
-- **OpenBao** and **Postgres** run on the **host machine** (Docker Compose / container).
-- The app reaches both over the host IP, authenticates to OpenBao with **AppRole**,
-  reads `secret/panda/db`, and connects to the host Postgres with those creds.
+- **App** runs in the **RKE2 Kubernetes cluster**, reading creds from a K8s Secret.
+- **OpenBao** and **Postgres** run on the **host machine**.
+- **Ansible** (Jenkins-driven) reads `secret/panda/db` from OpenBao via AppRole and
+  writes the K8s Secret; the app just reads env + connects to host Postgres.
 
 ```
-   RKE2 cluster                         Host machine
-  ┌──────────────┐   AppRole login     ┌──────────────┐
-  │  panda-app   │ ──────────────────▶ │  OpenBao      │  secret/panda/db
-  │ (Spring Boot)│ ◀── user/password ──│  :8200        │
-  │              │                     ├──────────────┤
-  │              │ ─── JDBC (user/pw) ▶│  Postgres     │  db: panda
-  └──────────────┘                     │  :5432        │
-                                       └──────────────┘
+ DEPLOY: Ansible ──AppRole read──▶ OpenBao(:8200)  ──writes──▶ K8s Secret panda-db-credentials
+ RUNTIME:                                                           │ envFrom
+   RKE2 cluster  ┌──────────────┐                                   ▼
+                 │  panda-app   │ ── env (SPRING_DATASOURCE_*) ◀──────┘
+                 │ (Spring Boot)│ ─── JDBC ──▶ Postgres(:5432) db: panda   (NO Vault code)
+                 └──────────────┘
 ```
 
 ---
 
 ## Status
 
-- ✅ **Deployed and verified in the RKE2 cluster** (2026-11-21). Pod `Running 1/1`; the
-  in-cluster app does AppRole login to host OpenBao (`192.168.64.1:8200`), reads
-  `secret/panda/db`, and connects to host Postgres (`192.168.64.1:5432`).
-- ✅ Reachable at **`http://192.168.64.2/panda`** (path-based Traefik routing, no Host
-  header — same style as `ingress-three-apps.yaml`) returns
-  `{"message":"Hello, World","database":"connected",...}`.
-- ✅ Image `panda-app:0.2.0` (linux/arm64) imported into the VM's RKE2 containerd.
+- ✅ **v0.3.0 deployed & verified (2026-11-22)** — Ansible push-at-deploy. App is
+  Vault-unaware; `GET http://192.168.64.2/panda` → `{"database":"connected",...}`.
+  Pod `Running 1/1` with `SPRING_DATASOURCE_*` from the Secret and **no `BAO_*` env**.
+- ✅ Ansible playbook (`ansible/sync-secret.yaml`) verified: `community.hashi_vault`
+  AppRole lookup reads OpenBao and creates `panda-db-credentials`.
+- ✅ Image `panda-app:0.3.0` (linux/arm64) imported into the VM's RKE2 containerd.
+- History: v0.2.0 used Spring Cloud Vault (AppRole, pull-at-runtime) — see `SPRING-OPENBAO-FLOW.md`.
 
 ### Environment specifics (this host)
 

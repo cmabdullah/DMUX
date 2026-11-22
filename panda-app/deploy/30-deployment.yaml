@@ -15,28 +15,19 @@ spec:
     spec:
       containers:
         - name: panda-app
-          image: panda-app:0.2.0 # or <registry>/panda-app:0.2.0
+          image: panda-app:0.3.0 # or <registry>/panda-app:0.3.0
           imagePullPolicy: IfNotPresent
           ports:
             - containerPort: 8080
+          # DB creds come from the panda-db-credentials Secret (populated by Ansible from OpenBao).
+          # The app is Vault-unaware: no BAO_* env, no Vault library.
+          envFrom:
+            - secretRef:
+                name: panda-db-credentials # SPRING_DATASOURCE_USERNAME / _PASSWORD
           env:
-            # OpenBao + Postgres run on the HOST machine. Set HOST_IP to an address
-            # the pods can route to (e.g. the node/host IP; verify per your RKE2 setup).
-            - { name: BAO_ADDR, value: "http://192.168.64.1:8200" }
             - { name: DB_HOST, value: "192.168.64.1" }
             - { name: DB_PORT, value: "5432" }
             - { name: DB_NAME, value: "panda" }
-            # AppRole credentials from the openbao-approle Secret
-            - name: BAO_ROLE_ID
-              valueFrom:
-                secretKeyRef:
-                  name: openbao-approle
-                  key: role-id
-            - name: BAO_SECRET_ID
-              valueFrom:
-                secretKeyRef:
-                  name: openbao-approle
-                  key: secret-id
           readinessProbe:
             httpGet:
               path: /actuator/health/readiness

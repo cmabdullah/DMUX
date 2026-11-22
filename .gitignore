@@ -3,3 +3,4 @@ openbao/logs/
 openbao/CREDENTIALS.local.md
 panda-app/deploy/APPROLE.local.md
 openbao/APPROLE-CURLS.local.md
+openbao/PANDA-V2-CURLS.local.md
