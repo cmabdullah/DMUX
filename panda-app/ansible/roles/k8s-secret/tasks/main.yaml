@@ -1,0 +1,24 @@
+- name: ensure namespace exists
+  kubernetes.core.k8s:
+    kubeconfig: "{{ kubeconfig_path }}"
+    definition:
+      apiVersion: v1
+      kind: Namespace
+      metadata:
+        name: "{{ app_namespace }}"
+
+- name: create/update panda-db-credentials secret
+  kubernetes.core.k8s:
+    kubeconfig: "{{ kubeconfig_path }}"
+    state: present
+    definition:
+      apiVersion: v1
+      kind: Secret
+      metadata:
+        name: panda-db-credentials
+        namespace: "{{ app_namespace }}"
+      type: Opaque
+      data:
+        SPRING_DATASOURCE_USERNAME: "{{ db_username | b64encode }}"
+        SPRING_DATASOURCE_PASSWORD: "{{ db_password | b64encode }}"
+  no_log: true
